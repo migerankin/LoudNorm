@@ -1,0 +1,31 @@
+name: Build LoudNorm
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        shell: cmd
+        run: |
+          msbuild LoudNorm.sln ^
+            /m ^
+            /p:Configuration=Release ^
+            /p:Platform=x64
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: LoudNorm-x64-Release
+          path: |
+            **/x64/Release/*.exe
