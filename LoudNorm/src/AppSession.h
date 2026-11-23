@@ -62,7 +62,8 @@ public:
     // ---- 测量 ----
     LoudnessEstimator estimator;
     double estimatedLufs = -140.0;
-    double latestPeakDbfs = -140.0;
+    double latestPeakDbfs = -140.0;   // 本周期瞬时峰值
+    double displayPeakDbfs = -140.0;  // 快起慢落，仅用于界面电平条
     bool playing = false;
     double activeMs = 0.0; // 连续有声时长
 

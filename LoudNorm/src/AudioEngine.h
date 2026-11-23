@@ -20,7 +20,8 @@ struct AppSnapshot
 {
     std::wstring name;
     DWORD pid = 0;
-    double estimatedLufs = -140.0;
+    double estimatedLufs = -140.0;  // 估算响度（估算 LUFS）
+    double peakDbfs = -140.0;       // 平滑后的峰值电平，用于界面电平条
     double targetLufs = -16.0;
     double appliedGainDb = 0.0;
     double theoreticalGainDb = 0.0;

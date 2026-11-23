@@ -296,6 +296,18 @@ void AudioEngine::TickApp(AppSession& app, const Settings& settings, double dtSe
         app.control->GetState(&sessionState);
 
     app.latestPeakDbfs = LinearToDb(peak);
+
+    // 界面电平条：快速起、缓慢落（峰值保持），避免读数抖动
+    if (app.latestPeakDbfs >= app.displayPeakDbfs)
+    {
+        app.displayPeakDbfs = app.latestPeakDbfs;
+    }
+    else
+    {
+        const double fall = 1.0 - std::exp(-(dtSeconds * 1000.0) / 420.0);
+        app.displayPeakDbfs += (app.latestPeakDbfs - app.displayPeakDbfs) * fall;
+    }
+
     const bool hasSignal = (sessionState == AudioSessionStateActive) && (app.latestPeakDbfs > kSilenceDbfs);
 
     app.estimator.SetWindowMs(SensitivityToWindowMs(settings.sensitivity));
@@ -382,6 +394,7 @@ void AudioEngine::PublishSnapshot(const Settings& settings)
         snapshot.name = app->name;
         snapshot.pid = app->pid;
         snapshot.estimatedLufs = app->estimatedLufs;
+        snapshot.peakDbfs = app->playing ? app->displayPeakDbfs : -140.0;
         snapshot.targetLufs = settings.targetLufs;
         snapshot.appliedGainDb = app->appliedGainDb;
         snapshot.theoreticalGainDb = app->theoreticalGainDb;

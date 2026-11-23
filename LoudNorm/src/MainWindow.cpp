@@ -1073,7 +1073,7 @@ LRESULT MainWindow::OnListCustomDraw(const NMLVCUSTOMDRAW* customDraw)
         if (column == kColumnLevel)
         {
             RECT cell = {};
-            ListView_GetSubitemRect(draw->nmcd.hdr.hwndFrom, row, kColumnLevel, LVIR_BOUNDS, &cell);
+            ListView_GetSubItemRect(draw->nmcd.hdr.hwndFrom, row, kColumnLevel, LVIR_BOUNDS, &cell);
             FillRect(draw->nmcd.hdc, &cell, selected ? theme::BrushRowA() : ((row % 2) ? theme::BrushRowB() : theme::BrushRowA()));
 
             if (inRange)
