@@ -494,8 +494,8 @@ void MainWindow::CreateControls()
     SendMessageW(sens, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
     make(L"STATIC", L"", SS_LEFT | SS_CENTERIMAGE, IDC_SENSVAL, 404, 260, 150, 20, theme::FontMono());
 
-    make(L"STATIC", L"调整速度 = 每秒允许的最大 dB 变化\r\n灵敏度 = 响度统计窗口（越大响应越快）", SS_LEFT,
-         0, 560, 210, 410, 62, theme::FontSmall());
+    label(L"调整速度 = 每秒允许的最大 dB 变化\r\n灵敏度 = 响度统计窗口（越大响应越快）", 560, 210, 410, 62,
+          theme::FontSmall());
 
     // ---- 面板 C：操作 ----
     make(L"BUTTON", L"暂停自动均衡", BS_OWNERDRAW, IDC_PAUSE, 26, 318, 150, 28, theme::FontUi());
@@ -518,8 +518,8 @@ void MainWindow::CreateControls()
         int width;
     };
     const Column columns[] = {
-        {L"应用 / SOURCE", 240}, {L"电平", 120},   {L"音量", 76},  {L"估算响度 LUFS", 120},
-        {L"目标", 82},           {L"自动增益", 104}, {L"理论调整", 92}, {L"状态", 114},
+        {L"应用 / SOURCE", 208}, {L"电平", 110},  {L"音量", 74},  {L"估算响度 LUFS", 118},
+        {L"目标", 82},           {L"自动增益", 100}, {L"理论调整", 92}, {L"状态", 104},
     };
     for (int i = 0; i < static_cast<int>(sizeof(columns) / sizeof(columns[0])); ++i)
     {
@@ -540,7 +540,7 @@ void MainWindow::CreateControls()
     }
 
     // ---- 底部状态条 ----
-    make(L"STATIC", L"", SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS, IDC_STATUS, 42, 674, 942, 18,
+    make(L"STATIC", L"", SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS, IDC_STATUS, 24, 674, 960, 18,
          theme::FontSmall());
 }
 
@@ -587,17 +587,11 @@ void MainWindow::CollectSettingsAndApply(bool saveToDisk)
 
     engine_.ApplySettings(settings_);
     if (saveToDisk)
-    {
         SettingsManager::Save(settings_);
-        settingsDirty_ = false;
-    }
-    else
-    {
-        settingsDirty_ = true;
-    }
 
     UpdateDynamicLabels();
     UpdateTrayTooltip();
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void MainWindow::UpdateDynamicLabels()
@@ -610,7 +604,7 @@ void MainWindow::UpdateDynamicLabels()
 
 void MainWindow::ApplyTarget(double value, bool saveToDisk)
 {
-    settings_.targetLufs = Clamp(value, -40.0, -5.0);
+    settings_.targetLufs = NormalizeTargetLufs(value);
     SetWindowTextW(Control(IDC_TARGET_EDIT), FormatW(L"%.1f", settings_.targetLufs).c_str());
     engine_.ApplySettings(settings_);
     if (saveToDisk)
@@ -697,8 +691,6 @@ void MainWindow::OnCommand(int id, int code)
         SendMessageW(button, BM_SETCHECK, checked == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED, 0);
         InvalidateRect(button, nullptr, TRUE);
         CollectSettingsAndApply(true);
-        RECT header = DRect(0, kHeaderTop, kClientWidth, kHeaderBottom);
-        InvalidateRect(hwnd_, &header, FALSE);
         break;
     }
 
@@ -712,14 +704,11 @@ void MainWindow::OnCommand(int id, int code)
         break;
 
     case IDC_PAUSE:
-    {
         engine_.SetPaused(!engine_.IsPaused());
         UpdateDynamicLabels();
         UpdateTrayTooltip();
-        RECT header = DRect(0, kHeaderTop, kClientWidth, kHeaderBottom);
-        InvalidateRect(hwnd_, &header, FALSE);
+        InvalidateRect(hwnd_, nullptr, FALSE);
         break;
-    }
 
     case IDC_RESTORE:
         engine_.RestoreAllNow();
@@ -745,20 +734,12 @@ void MainWindow::OnCommand(int id, int code)
         }
         LoadSettingsToControls();
         CollectSettingsAndApply(true);
-        {
-            RECT header = DRect(0, kHeaderTop, kClientWidth, kHeaderBottom);
-            InvalidateRect(hwnd_, &header, FALSE);
-        }
         break;
 
     case IDM_TRAY_TESTMODE:
         settings_.testMode = !settings_.testMode;
         LoadSettingsToControls();
         CollectSettingsAndApply(true);
-        {
-            RECT header = DRect(0, kHeaderTop, kClientWidth, kHeaderBottom);
-            InvalidateRect(hwnd_, &header, FALSE);
-        }
         break;
 
     case IDM_TRAY_RESTORE:
@@ -780,7 +761,7 @@ void MainWindow::OnHorizontalScroll(HWND source)
         return;
     const int id = GetDlgCtrlID(source);
     if (id == IDC_RATE || id == IDC_SENS)
-        CollectSettingsAndApply(false); // 拖动过程不写盘，退出/隐藏时再落盘
+        CollectSettingsAndApply(true);
 }
 
 void MainWindow::OnDrawItem(const DRAWITEMSTRUCT& item)
@@ -1021,14 +1002,9 @@ LRESULT MainWindow::OnListCustomDraw(const NMLVCUSTOMDRAW* customDraw)
 
         if (column == kColumnLevel)
         {
-            // 注意：LVM_GETSUBITEMRECT 需要 rc.left = 子项序号，rc.top = 行号
             RECT cell = {};
-            cell.left = kColumnLevel;
-            cell.top = row;
-            SendMessageW(draw->nmcd.hdr.hwndFrom, LVM_GETSUBITEMRECT, static_cast<WPARAM>(row),
-                         reinterpret_cast<LPARAM>(&cell));
-            FillRect(draw->nmcd.hdc, &cell,
-                     selected ? theme::BrushRowA() : ((row % 2) ? theme::BrushRowB() : theme::BrushRowA()));
+            ListView_GetSubitemRect(draw->nmcd.hdr.hwndFrom, row, kColumnLevel, LVIR_BOUNDS, &cell);
+            FillRect(draw->nmcd.hdc, &cell, selected ? theme::BrushRowA() : ((row % 2) ? theme::BrushRowB() : theme::BrushRowA()));
 
             if (inRange)
             {
@@ -1142,11 +1118,6 @@ void MainWindow::HideToTray()
 {
     if (!hwnd_)
         return;
-    if (settingsDirty_)
-    {
-        SettingsManager::Save(settings_);
-        settingsDirty_ = false;
-    }
     ShowWindow(hwnd_, SW_HIDE);
     hidden_ = true;
     if (!trayHintShown_)
@@ -1173,11 +1144,6 @@ void MainWindow::ExitApplication()
     exiting_ = true;
 
     KillTimer(hwnd_, kTimerId);
-    if (settingsDirty_)
-    {
-        SettingsManager::Save(settings_);
-        settingsDirty_ = false;
-    }
     engine_.Stop();
     tray_.Remove();
 

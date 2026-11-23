@@ -386,7 +386,6 @@ void AudioEngine::PublishSnapshot(const Settings& settings)
         snapshot.appliedGainDb = app->appliedGainDb;
         snapshot.theoreticalGainDb = app->theoreticalGainDb;
         snapshot.volumePercent = app->volumePercent;
-        snapshot.peakDbfs = app->latestPeakDbfs;
         snapshot.playing = app->playing;
         snapshot.state = app->state;
         snapshots.push_back(std::move(snapshot));

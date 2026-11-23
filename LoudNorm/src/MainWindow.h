@@ -59,7 +59,6 @@ private:
     bool exiting_ = false;
     bool hidden_ = false;
     bool trayHintShown_ = false;
-    bool settingsDirty_ = false;
 
     std::vector<AppSnapshot> lastSnapshots_;
     std::vector<std::vector<std::wstring>> rowCache_;

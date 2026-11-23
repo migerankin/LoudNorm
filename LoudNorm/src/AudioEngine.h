@@ -25,7 +25,6 @@ struct AppSnapshot
     double appliedGainDb = 0.0;
     double theoreticalGainDb = 0.0;
     double volumePercent = 100.0;
-    double peakDbfs = -140.0;
     bool playing = false;
     AppState state = AppState::Disabled;
 };
