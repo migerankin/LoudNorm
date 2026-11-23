@@ -1,0 +1,156 @@
+name: Build Windows executables
+
+# 用 PyInstaller 把项目打成两个 onefile exe，灵感与产物与 build.ps1 保持一致：
+#   dist\autolevel-gui.exe   窗口版
+#   dist\autolevel.exe       控制台 CLI
+#
+# 触发方式：
+#   * 推送 v* 标签  -> 测试、构建，并把 exe 附加到同名 GitHub Release
+#   * 手动运行      -> 测试、构建，产物留在本次运行的 Artifacts 里
+#
+# 这里不重复 PyInstaller 的参数：打包逻辑只有 build.ps1 一处，
+# 工作流只负责准备它要求的 .venv。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# 默认只读；写权限只授予真正需要它的 release 作业。
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  # 发布过程中被打断会留下半个 Release，所以不取消正在跑的构建。
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: 测试（Python 3.11 / Windows）
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          # pycaw / comtypes 未在 3.14 上验证过，不要用默认解释器。
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: 安装项目
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --editable ".[dev]"
+
+      - name: 运行测试
+        # 标签推送不会触发 ci.yml，所以打包前自己跑一遍。
+        run: python -m pytest -q -W error
+
+  build:
+    name: 打包 exe
+    needs: test
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: 准备构建用 venv（.venv）
+        # build.ps1 固定使用 .venv\Scripts\python.exe，并把 PYTHONPATH 清空，
+        # 所以依赖必须装进这个 venv，而不是 runner 的全局 Python。
+        run: |
+          python -m venv .venv
+          .venv\Scripts\python.exe -m pip install --upgrade pip
+          .venv\Scripts\python.exe -m pip install --editable ".[dev]" pyinstaller
+          .venv\Scripts\python.exe -m PyInstaller --version
+
+      - name: 构建（.\build.ps1）
+        shell: pwsh
+        run: |
+          # 有些镜像把脚本执行策略设为 Restricted，进程级放开即可，不需要管理员。
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          .\build.ps1
+          if ($LASTEXITCODE -ne 0) { throw "build.ps1 退出码为 $LASTEXITCODE" }
+
+      - name: 冒烟检查产物
+        # 只检查文件存在是不够的：PyInstaller 漏收模块时，失败发生在运行期。
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          foreach ($exe in "dist\autolevel-gui.exe", "dist\autolevel.exe") {
+              if (-not (Test-Path $exe)) { throw "缺少产物：$exe" }
+              $mb = (Get-Item $exe).Length / 1MB
+              if ($mb -lt 20) { throw "$exe 只有 $([math]::Round($mb, 1)) MB，明显不正常" }
+              "{0}  {1:N1} MB" -f $exe, $mb
+          }
+
+          # 这两条都不碰音频设备，可以在没有声卡的 runner 上跑。
+          & .\dist\autolevel.exe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "autolevel.exe --help 退出码为 $LASTEXITCODE" }
+
+          & .\dist\autolevel.exe config | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "autolevel.exe config 退出码为 $LASTEXITCODE" }
+
+          "冒烟检查通过"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: autolevel-windows-x64
+          path: |
+            dist/autolevel-gui.exe
+            dist/autolevel.exe
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: 发布 Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    # 发布只是上传文件，不需要 Windows 机器；runner 自带 gh。
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: 下载产物
+        uses: actions/download-artifact@v4
+        with:
+          name: autolevel-windows-x64
+          path: dist
+
+      - name: 创建或更新 Release 并附加 exe
+        # 用 runner 自带的 gh，避免再引入一个第三方 action。
+        # GH_REPO 必须显式设置：这个作业没有检出代码，gh 无法自行推断仓库。
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # 已存在的 Release（比如重推同名标签）只更新附件，不重复创建。
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --title "autolevel $TAG" --generate-notes
+          fi
+
+          gh release upload "$TAG" \
+            dist/autolevel-gui.exe \
+            dist/autolevel.exe \
+            --clobber
+
+          echo "已发布：$TAG"

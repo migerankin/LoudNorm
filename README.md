@@ -192,13 +192,20 @@ autolevel gui --minimized     # 登录时实际执行的命令
 
 `dist/` 是刻意排除在 git 之外的：每个 exe 约 43 MB，每次提交构建产物都会永久撑大仓库体积。它们以 Release 附件的形式分发。
 
+推送 `v*` 标签即可，CI 会代劳：
+
 ```powershell
-.\build.ps1
 git tag v0.2.0
 git push origin v0.2.0
 ```
 
-然后在 GitHub 上用该 tag 创建发布，附上 `dist\autolevel-gui.exe` 和 `dist\autolevel.exe`。
+`.github/workflows/build.yml` 随后在 Windows runner 上跑测试、调用 `build.ps1` 打包，并把 `autolevel-gui.exe` 与 `autolevel.exe` 附加到同名 Release（已存在则只更新附件）。用 `gh workflow run` 或 Actions 页面的 **Run workflow** 手动触发时，产物只留在该次运行的 Artifacts 里，不会发版。
+
+想先在本地验证，仍可直接构建：
+
+```powershell
+.\build.ps1
+```
 
 ## 构建可执行文件
 
