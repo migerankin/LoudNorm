@@ -18,6 +18,12 @@
     <ClCompile Include="src\AutoGainController.cpp">
       <Filter>Source</Filter>
     </ClCompile>
+    <ClCompile Include="src\FaderControl.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClCompile Include="src\Theme.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
     <ClCompile Include="src\LoudnessEstimator.cpp">
       <Filter>Source</Filter>
     </ClCompile>
@@ -51,6 +57,12 @@
       <Filter>Header</Filter>
     </ClInclude>
     <ClInclude Include="src\Common.h">
+      <Filter>Header</Filter>
+    </ClInclude>
+    <ClInclude Include="src\FaderControl.h">
+      <Filter>Header</Filter>
+    </ClInclude>
+    <ClInclude Include="src\Theme.h">
       <Filter>Header</Filter>
     </ClInclude>
     <ClInclude Include="src\LoudnessEstimator.h">

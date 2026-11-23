@@ -94,9 +94,11 @@
     <ClCompile Include="src\AudioEngine.cpp" />
     <ClCompile Include="src\AudioSessionManager.cpp" />
     <ClCompile Include="src\AutoGainController.cpp" />
+    <ClCompile Include="src\FaderControl.cpp" />
     <ClCompile Include="src\LoudnessEstimator.cpp" />
     <ClCompile Include="src\MainWindow.cpp" />
     <ClCompile Include="src\SettingsManager.cpp" />
+    <ClCompile Include="src\Theme.cpp" />
     <ClCompile Include="src\TrayController.cpp" />
     <ClCompile Include="src\VolumeController.cpp" />
     <ClCompile Include="src\main.cpp" />
@@ -107,10 +109,12 @@
     <ClInclude Include="src\AudioSessionManager.h" />
     <ClInclude Include="src\AutoGainController.h" />
     <ClInclude Include="src\Common.h" />
+    <ClInclude Include="src\FaderControl.h" />
     <ClInclude Include="src\LoudnessEstimator.h" />
     <ClInclude Include="src\MainWindow.h" />
     <ClInclude Include="src\Settings.h" />
     <ClInclude Include="src\SettingsManager.h" />
+    <ClInclude Include="src\Theme.h" />
     <ClInclude Include="src\TrayController.h" />
     <ClInclude Include="src\VolumeController.h" />
   </ItemGroup>

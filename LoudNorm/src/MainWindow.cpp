@@ -1,15 +1,25 @@
-// MainWindow.cpp
+// MainWindow.cpp - 录音棚调音台 / 太空复古风格自绘界面
 #include "MainWindow.h"
 
+#include "FaderControl.h"
 #include "SettingsManager.h"
+#include "Theme.h"
+
+#include <uxtheme.h>
+
+#pragma comment(lib, "uxtheme.lib")
 
 namespace ln {
 
 namespace {
 
+// ---- 控件 ID ----
 enum : int
 {
-    IDC_TARGET = 1001,
+    IDC_TARGET_EDIT = 1001,
+    IDC_TARGET_MINUS,
+    IDC_TARGET_PLUS,
+    IDC_TARGET_PRESET,
     IDC_AUTO,
     IDC_TESTMODE,
     IDC_MAXGAIN,
@@ -35,9 +45,36 @@ enum : int
     IDM_TRAY_TESTMODE,
     IDM_TRAY_RESTORE,
     IDM_TRAY_EXIT,
+    IDM_PRESET_BASE = 40200,
 };
 
 constexpr int kTimerId = 1;
+
+// ---- 布局（96 DPI 设计坐标）----
+constexpr int kClientWidth = 1000;
+constexpr int kClientHeight = 700;
+
+constexpr int kHeaderTop = 0, kHeaderBottom = 62;
+constexpr int kPlateATop = 72, kPlateABottom = 142;
+constexpr int kPlateBTop = 150, kPlateBBottom = 300;
+constexpr int kPlateCTop = 308, kPlateCBottom = 352;
+constexpr int kPlateDTop = 360, kPlateDBottom = 668;
+constexpr int kStatusTop = 672, kStatusBottom = 694;
+
+constexpr int kColumnLevel = 1;
+
+struct EditSpec
+{
+    int id;
+    int left, top, right, bottom;
+};
+
+// 数值输入框位置（同时用于“内凹显示窗”的绘制）
+constexpr EditSpec kEditSpecs[] = {
+    {IDC_TARGET_EDIT, 30, 102, 146, 128},  {IDC_MAXGAIN, 120, 182, 182, 206},
+    {IDC_MINGAIN, 300, 182, 362, 206},     {IDC_ATTACK, 466, 182, 528, 206},
+    {IDC_RELEASE, 630, 182, 692, 206},     {IDC_CALIB, 796, 182, 858, 206},
+};
 
 std::wstring GetText(HWND hwnd)
 {
@@ -57,10 +94,129 @@ double ParseNumber(const std::wstring& text, double fallback)
     return value;
 }
 
+// 罗盘 / 星空般的背景斑点
+void PaintStarField(HDC dc, const RECT& rc)
+{
+    unsigned int seed = 0x1F2E3D4Cu;
+    const int width = std::max(1, static_cast<int>(rc.right - rc.left));
+    const int height = std::max(1, static_cast<int>(rc.bottom - rc.top));
+
+    for (int i = 0; i < 240; ++i)
+    {
+        seed = seed * 1664525u + 1013904223u;
+        const int x = rc.left + static_cast<int>(seed % static_cast<unsigned int>(width));
+        seed = seed * 1664525u + 1013904223u;
+        const int y = rc.top + static_cast<int>(seed % static_cast<unsigned int>(height));
+        seed = seed * 1664525u + 1013904223u;
+
+        const int brightness = 20 + static_cast<int>((seed >> 13) % 30);
+        SetPixelV(dc, x, y, RGB(brightness, brightness + 4, brightness + 12));
+    }
+}
+
+void DrawConsoleButton(HDC dc, const RECT& rc, const std::wstring& text, bool pressed, bool accent)
+{
+    theme::FillSolid(dc, rc, pressed ? RGB(17, 21, 27) : RGB(34, 41, 51));
+
+    RECT top = {rc.left + 1, rc.top + 1, rc.right - 1, rc.top + 2};
+    theme::FillSolid(dc, top, pressed ? RGB(11, 14, 18) : RGB(78, 89, 105));
+
+    RECT bottom = {rc.left + 1, rc.bottom - 2, rc.right - 1, rc.bottom - 1};
+    theme::FillSolid(dc, bottom, pressed ? RGB(62, 72, 86) : RGB(7, 9, 12));
+
+    theme::DrawOutline(dc, rc, accent ? theme::kAmberDim : RGB(56, 64, 78));
+
+    RECT textRect = rc;
+    if (pressed)
+        OffsetRect(&textRect, 0, 1);
+
+    HGDIOBJ oldFont = SelectObject(dc, theme::FontUi());
+    theme::DrawTextSimple(dc, text, textRect, pressed ? theme::kAmber : theme::kCream,
+                          DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dc, oldFont);
+}
+
+void DrawLedToggle(HDC dc, const RECT& rc, const std::wstring& text, bool on, COLORREF color)
+{
+    const int centerY = (rc.top + rc.bottom) / 2;
+    const int centerX = rc.left + 9;
+
+    theme::DrawLed(dc, centerX, centerY, 5, color, on);
+
+    RECT textRect = rc;
+    textRect.left = centerX + 13;
+    HGDIOBJ oldFont = SelectObject(dc, theme::FontUi());
+    theme::DrawTextSimple(dc, text, textRect, on ? theme::kCream : theme::kDim,
+                          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dc, oldFont);
+}
+
+// 表头（ListView 的 Header 子类化后自绘）
+LRESULT CALLBACK ListHeaderProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
+                                UINT_PTR subclassId, DWORD_PTR refData)
+{
+    UNREFERENCED_PARAMETER(subclassId);
+    UNREFERENCED_PARAMETER(refData);
+
+    switch (message)
+    {
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps = {};
+        HDC dc = BeginPaint(hwnd, &ps);
+
+        RECT client = {};
+        GetClientRect(hwnd, &client);
+        theme::FillVerticalGradient(dc, client, theme::kHeaderBar, RGB(19, 23, 30));
+
+        const int count = Header_GetItemCount(hwnd);
+        HGDIOBJ oldFont = SelectObject(dc, theme::FontSmall());
+
+        for (int i = 0; i < count; ++i)
+        {
+            RECT itemRect = {};
+            if (!Header_GetItemRect(hwnd, i, &itemRect))
+                continue;
+
+            wchar_t text[128] = {};
+            HDITEMW item = {};
+            item.mask = HDI_TEXT;
+            item.pszText = text;
+            item.cchTextMax = 128;
+            Header_GetItem(hwnd, i, &item);
+
+            RECT textRect = itemRect;
+            textRect.left += 10;
+            theme::DrawTextSimple(dc, text, textRect, theme::kAmberDim,
+                                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+
+            RECT separator = {itemRect.right - 1, itemRect.top + 6, itemRect.right, itemRect.bottom - 5};
+            theme::FillSolid(dc, separator, RGB(48, 57, 70));
+        }
+
+        SelectObject(dc, oldFont);
+
+        RECT bottomLine = {client.left, client.bottom - 1, client.right, client.bottom};
+        theme::FillSolid(dc, bottomLine, theme::kAmberDeep);
+
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+
+    default:
+        break;
+    }
+
+    return DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
-// 窗口创建与消息循环
+// 窗口骨架
 // ---------------------------------------------------------------------------
 bool MainWindow::Create(HINSTANCE instance)
 {
@@ -74,13 +230,13 @@ bool MainWindow::Create(HINSTANCE instance)
     wc.hInstance = instance;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    wc.hbrBackground = GetSysColorBrush(COLOR_BTNFACE);
+    wc.hbrBackground = nullptr;
     wc.lpszClassName = kMainWindowClass;
     wc.lpszMenuName = nullptr;
     RegisterClassExW(&wc);
 
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
-    RECT rect = {0, 0, D(1000), D(700)};
+    RECT rect = {0, 0, D(kClientWidth), D(kClientHeight)};
     AdjustWindowRectEx(&rect, style, FALSE, 0);
 
     hwnd_ = CreateWindowExW(0, kMainWindowClass, kAppTitle, style, CW_USEDEFAULT, CW_USEDEFAULT,
@@ -98,8 +254,7 @@ bool MainWindow::Create(HINSTANCE instance)
     if (dpi_ <= 0)
         dpi_ = 96;
 
-    // 按实际 DPI 调整窗口客户区尺寸（布局以 96 DPI 为基准设计）
-    RECT desired = {0, 0, D(1000), D(700)};
+    RECT desired = {0, 0, D(kClientWidth), D(kClientHeight)};
     AdjustWindowRectEx(&desired, style, FALSE, 0);
     SetWindowPos(hwnd_, nullptr, 0, 0, desired.right - desired.left, desired.bottom - desired.top,
                  SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -111,6 +266,12 @@ bool MainWindow::Create(HINSTANCE instance)
         return false;
     }
     return true;
+}
+
+RECT MainWindow::DRect(int left, int top, int right, int bottom) const
+{
+    RECT rc = {D(left), D(top), D(right), D(bottom)};
+    return rc;
 }
 
 void MainWindow::ShowWindowFromSettings()
@@ -170,6 +331,13 @@ LRESULT MainWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
     case WM_CREATE:
         return 0;
 
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_PAINT:
+        OnPaint();
+        return 0;
+
     case WM_TIMER:
         if (wParam == kTimerId)
             OnTimer();
@@ -183,11 +351,36 @@ LRESULT MainWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
         OnHorizontalScroll(reinterpret_cast<HWND>(lParam));
         return 0;
 
+    case WM_DRAWITEM:
+        OnDrawItem(*reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        return TRUE;
+
+    case WM_NOTIFY:
+    {
+        auto* header = reinterpret_cast<NMHDR*>(lParam);
+        if (header && header->code == NM_CUSTOMDRAW && header->hwndFrom == Control(IDC_LIST))
+            return OnListCustomDraw(reinterpret_cast<NMLVCUSTOMDRAW*>(lParam));
+        return 0;
+    }
+
     case WM_CTLCOLORSTATIC:
     {
         HDC dc = reinterpret_cast<HDC>(wParam);
+        HWND control = reinterpret_cast<HWND>(lParam);
+        const int id = GetDlgCtrlID(control);
+        const bool readout = (id == IDC_STATUS || id == IDC_RATEVAL || id == IDC_SENSVAL);
         SetBkMode(dc, TRANSPARENT);
-        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_BTNFACE));
+        SetTextColor(dc, readout ? theme::kAmber : theme::kDim);
+        return reinterpret_cast<LRESULT>(theme::BrushPanel());
+    }
+
+    case WM_CTLCOLOREDIT:
+    {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        SetBkMode(dc, OPAQUE);
+        SetBkColor(dc, theme::kWell);
+        SetTextColor(dc, theme::kAmber);
+        return reinterpret_cast<LRESULT>(theme::BrushWell());
     }
 
     case kTrayCallbackMessage:
@@ -215,12 +408,7 @@ LRESULT MainWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
 
     case WM_DESTROY:
         KillTimer(hwnd, kTimerId);
-        if (font_)
-            DeleteObject(font_);
-        if (fontBold_)
-            DeleteObject(fontBold_);
-        if (fontSmall_)
-            DeleteObject(fontSmall_);
+        theme::Destroy();
         PostQuitMessage(0);
         return 0;
 
@@ -231,11 +419,13 @@ LRESULT MainWindow::WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lP
 }
 
 // ---------------------------------------------------------------------------
-// 界面构建
+// 构建
 // ---------------------------------------------------------------------------
 bool MainWindow::OnCreate()
 {
-    CreateFonts();
+    theme::Create(dpi_);
+    RegisterFaderClass(instance_);
+
     CreateControls();
     LoadSettingsToControls();
 
@@ -245,96 +435,82 @@ bool MainWindow::OnCreate()
     tray_.Add(hwnd_, kTrayCallbackMessage, L"LoudNorm - 绝对响度自动均衡");
     UpdateTrayTooltip();
 
-    SetTimer(hwnd_, kTimerId, 200, nullptr);
+    SetTimer(hwnd_, kTimerId, 120, nullptr);
     return true;
-}
-
-void MainWindow::CreateFonts()
-{
-    const int height = -MulDiv(9, dpi_, 72);
-    font_ = CreateFontW(height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                        DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-    fontBold_ = CreateFontW(-MulDiv(11, dpi_, 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                            DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
-    fontSmall_ = CreateFontW(-MulDiv(8, dpi_, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                             DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
 }
 
 void MainWindow::CreateControls()
 {
     const auto make = [this](const wchar_t* className, const wchar_t* text, DWORD style, int id,
-                             int x, int y, int w, int h, HFONT font) -> HWND {
-        HWND control = CreateWindowExW(0, className, text, WS_CHILD | WS_VISIBLE | style, D(x), D(y),
-                                       D(w), D(h), hwnd_, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
-                                       instance_, nullptr);
+                             int left, int top, int width, int height, HFONT font) -> HWND {
+        HWND control = CreateWindowExW(0, className, text, WS_CHILD | WS_VISIBLE | style, D(left), D(top),
+                                       D(width), D(height), hwnd_,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
         if (control && font)
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         return control;
     };
 
-    const auto label = [&](const wchar_t* text, int x, int y, int w, int h, HFONT font) {
-        make(L"STATIC", text, SS_LEFT | SS_CENTERIMAGE, 0, x, y, w, h, font);
+    const auto label = [&](const wchar_t* text, int left, int top, int width, int height, HFONT font) {
+        make(L"STATIC", text, SS_LEFT | SS_CENTERIMAGE, 0, left, top, width, height, font);
     };
 
-    // ---- 目标响度 ----
-    make(L"BUTTON", L"绝对目标响度（唯一基准）", BS_GROUPBOX, 0, 12, 10, 976, 62, font_);
-    label(L"目标响度 (LUFS)", 24, 34, 120, 20, font_);
+    // ---- 顶栏：标题 + 状态指示灯（全部由 WM_PAINT 绘制，无子控件）----
 
-    HWND target = make(L"ComboBox", L"", CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL, IDC_TARGET,
-                       150, 30, 160, 260, font_);
-    int presetCount = 0;
-    const LoudnessPreset* presets = LoudnessPresets(presetCount);
-    for (int i = 0; i < presetCount; ++i)
-        SendMessageW(target, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(presets[i].label));
+    // ---- 面板 A：绝对目标响度 ----
+    make(L"EDIT", L"-16.0", ES_CENTER | ES_AUTOHSCROLL, IDC_TARGET_EDIT, 30, 102, 116, 26,
+         theme::FontMonoBig());
+    make(L"BUTTON", L"-", BS_OWNERDRAW, IDC_TARGET_MINUS, 158, 102, 26, 26, theme::FontMono());
+    make(L"BUTTON", L"+", BS_OWNERDRAW, IDC_TARGET_PLUS, 186, 102, 26, 26, theme::FontMono());
+    make(L"BUTTON", L"PRESET", BS_OWNERDRAW, IDC_TARGET_PRESET, 220, 102, 112, 26, theme::FontSmall());
 
-    label(L"每个应用都以该绝对值独立测量、独立调整，互不作为参考源", 322, 34, 310, 20, fontSmall_);
-    make(L"BUTTON", L"启用自动均衡", BS_AUTOCHECKBOX, IDC_AUTO, 640, 32, 140, 22, font_);
-    make(L"BUTTON", L"测试模式（只计算，不改音量）", BS_AUTOCHECKBOX, IDC_TESTMODE, 790, 32, 190, 22, font_);
+    label(L"绝对基准 · 每个应用独立测量 / 独立调整", 348, 104, 320, 22, theme::FontSmall());
+    make(L"BUTTON", L"自动均衡", BS_OWNERDRAW, IDC_AUTO, 684, 101, 130, 28, theme::FontUi());
+    make(L"BUTTON", L"测试模式", BS_OWNERDRAW, IDC_TESTMODE, 826, 101, 140, 28, theme::FontUi());
 
-    // ---- 增益参数 ----
-    make(L"BUTTON", L"自动增益 / 平滑参数", BS_GROUPBOX, 0, 12, 80, 976, 136, font_);
+    // ---- 面板 B：增益 / 平滑参数 ----
+    label(L"最大增益 dB", 26, 184, 90, 20, theme::FontSmall());
+    make(L"EDIT", L"", ES_RIGHT | ES_AUTOHSCROLL, IDC_MAXGAIN, 120, 182, 62, 24, theme::FontMono());
 
-    label(L"最大增益 (dB)", 24, 110, 90, 20, font_);
-    make(L"EDIT", L"", ES_AUTOHSCROLL | ES_RIGHT, IDC_MAXGAIN, 120, 106, 60, 22, font_);
+    label(L"最大衰减 dB", 206, 184, 90, 20, theme::FontSmall());
+    make(L"EDIT", L"", ES_RIGHT | ES_AUTOHSCROLL, IDC_MINGAIN, 300, 182, 62, 24, theme::FontMono());
 
-    label(L"最大衰减 (dB)", 196, 110, 90, 20, font_);
-    make(L"EDIT", L"", ES_AUTOHSCROLL | ES_RIGHT, IDC_MINGAIN, 292, 106, 60, 22, font_);
+    label(L"ATTACK ms", 372, 184, 90, 20, theme::FontSmall());
+    make(L"EDIT", L"", ES_RIGHT | ES_AUTOHSCROLL, IDC_ATTACK, 466, 182, 62, 24, theme::FontMono());
 
-    label(L"Attack (ms)", 368, 110, 80, 20, font_);
-    make(L"EDIT", L"", ES_AUTOHSCROLL | ES_RIGHT, IDC_ATTACK, 452, 106, 60, 22, font_);
+    label(L"RELEASE ms", 536, 184, 90, 20, theme::FontSmall());
+    make(L"EDIT", L"", ES_RIGHT | ES_AUTOHSCROLL, IDC_RELEASE, 630, 182, 62, 24, theme::FontMono());
 
-    label(L"Release (ms)", 528, 110, 84, 20, font_);
-    make(L"EDIT", L"", ES_AUTOHSCROLL | ES_RIGHT, IDC_RELEASE, 616, 106, 60, 22, font_);
+    label(L"响度校准 dB", 702, 184, 90, 20, theme::FontSmall());
+    make(L"EDIT", L"", ES_RIGHT | ES_AUTOHSCROLL, IDC_CALIB, 796, 182, 62, 24, theme::FontMono());
 
-    label(L"响度校准 (dB)", 692, 110, 90, 20, font_);
-    make(L"EDIT", L"", ES_AUTOHSCROLL | ES_RIGHT, IDC_CALIB, 788, 106, 60, 22, font_);
-
-    label(L"调整速度", 24, 150, 64, 20, font_);
-    HWND rate = make(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS, IDC_RATE, 92, 142, 230, 30, font_);
+    label(L"调整速度", 26, 216, 64, 20, theme::FontSmall());
+    HWND rate = make(kFaderClass, L"", WS_TABSTOP, IDC_RATE, 96, 206, 300, 36, nullptr);
     SendMessageW(rate, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
-    make(L"STATIC", L"", SS_LEFT | SS_CENTERIMAGE, IDC_RATEVAL, 330, 150, 110, 20, font_);
+    make(L"STATIC", L"", SS_LEFT | SS_CENTERIMAGE, IDC_RATEVAL, 404, 216, 150, 20, theme::FontMono());
 
-    label(L"灵敏度", 452, 150, 50, 20, font_);
-    HWND sens = make(TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS, IDC_SENS, 508, 142, 230, 30, font_);
+    label(L"灵敏度", 26, 260, 64, 20, theme::FontSmall());
+    HWND sens = make(kFaderClass, L"", WS_TABSTOP, IDC_SENS, 96, 250, 300, 36, nullptr);
     SendMessageW(sens, TBM_SETRANGE, TRUE, MAKELPARAM(0, 100));
-    make(L"STATIC", L"", SS_LEFT | SS_CENTERIMAGE, IDC_SENSVAL, 746, 150, 150, 20, font_);
+    make(L"STATIC", L"", SS_LEFT | SS_CENTERIMAGE, IDC_SENSVAL, 404, 260, 150, 20, theme::FontMono());
 
-    label(L"提示：调整速度同时限制每秒最大 dB 变化，灵敏度决定响度统计窗口", 24, 178, 800, 20, fontSmall_);
+    make(L"STATIC", L"调整速度 = 每秒允许的最大 dB 变化\r\n灵敏度 = 响度统计窗口（越大响应越快）", SS_LEFT,
+         0, 560, 210, 410, 62, theme::FontSmall());
 
-    // ---- 操作按钮 ----
-    make(L"BUTTON", L"暂停自动均衡", BS_PUSHBUTTON, IDC_PAUSE, 12, 226, 140, 30, font_);
-    make(L"BUTTON", L"恢复所有应用原始音量", BS_PUSHBUTTON, IDC_RESTORE, 164, 226, 190, 30, font_);
-    make(L"BUTTON", L"恢复自动接管", BS_PUSHBUTTON, IDC_RESUME, 366, 226, 160, 30, font_);
-    label(L"手动拖动某应用音量后，程序会交出该应用的控制权，可点“恢复自动接管”", 540, 232, 448, 20, fontSmall_);
+    // ---- 面板 C：操作 ----
+    make(L"BUTTON", L"暂停自动均衡", BS_OWNERDRAW, IDC_PAUSE, 26, 318, 150, 28, theme::FontUi());
+    make(L"BUTTON", L"恢复所有应用原始音量", BS_OWNERDRAW, IDC_RESTORE, 190, 318, 200, 28, theme::FontUi());
+    make(L"BUTTON", L"恢复自动接管", BS_OWNERDRAW, IDC_RESUME, 404, 318, 180, 28, theme::FontUi());
+    label(L"手动拖动应用音量 → 该应用自动交出控制权", 600, 322, 370, 20, theme::FontSmall());
 
-    // ---- 应用列表 ----
-    HWND list = make(L"SysListView32", L"",
-                     LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER, IDC_LIST, 12, 268, 976, 380,
-                     font_);
-    ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES);
+    // ---- 面板 D：会话列表 ----
+    HWND list = make(L"SysListView32", L"", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS, IDC_LIST, 26, 392,
+                     948, 268, theme::FontUi());
+    ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
+    SetWindowTheme(list, L"", L"");
+    ListView_SetBkColor(list, theme::kWell);
+    ListView_SetTextBkColor(list, theme::kWell);
+    ListView_SetTextColor(list, theme::kCream);
 
     struct Column
     {
@@ -342,8 +518,8 @@ void MainWindow::CreateControls()
         int width;
     };
     const Column columns[] = {
-        {L"应用名称", 200},   {L"应用音量", 80},        {L"估算响度 (LUFS)", 130}, {L"目标 (LUFS)", 95},
-        {L"自动增益 (dB)", 105}, {L"理论调整 (dB)", 105}, {L"状态", 140},
+        {L"应用 / SOURCE", 240}, {L"电平", 120},   {L"音量", 76},  {L"估算响度 LUFS", 120},
+        {L"目标", 82},           {L"自动增益", 104}, {L"理论调整", 92}, {L"状态", 114},
     };
     for (int i = 0; i < static_cast<int>(sizeof(columns) / sizeof(columns[0])); ++i)
     {
@@ -355,15 +531,22 @@ void MainWindow::CreateControls()
         ListView_InsertColumn(list, i, &column);
     }
 
-    // ---- 状态栏 ----
-    make(L"STATIC", L"", SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS, IDC_STATUS, 12, 656, 976, 22, fontSmall_);
+    HWND header = reinterpret_cast<HWND>(SendMessageW(list, LVM_GETHEADER, 0, 0));
+    if (header)
+    {
+        SendMessageW(header, WM_SETFONT, reinterpret_cast<WPARAM>(theme::FontUi()), TRUE);
+        SetWindowTheme(header, L"", L"");
+        SetWindowSubclass(header, ListHeaderProc, 1, 0);
+    }
 
-    (void)fontBold_;
+    // ---- 底部状态条 ----
+    make(L"STATIC", L"", SS_LEFT | SS_CENTERIMAGE | SS_ENDELLIPSIS, IDC_STATUS, 42, 674, 942, 18,
+         theme::FontSmall());
 }
 
 void MainWindow::LoadSettingsToControls()
 {
-    SetWindowTextW(Control(IDC_TARGET), FormatW(L"%.1f", settings_.targetLufs).c_str());
+    SetWindowTextW(Control(IDC_TARGET_EDIT), FormatW(L"%.1f", settings_.targetLufs).c_str());
     SendMessageW(Control(IDC_AUTO), BM_SETCHECK, settings_.autoEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(Control(IDC_TESTMODE), BM_SETCHECK, settings_.testMode ? BST_CHECKED : BST_UNCHECKED, 0);
 
@@ -379,16 +562,14 @@ void MainWindow::LoadSettingsToControls()
                  static_cast<LPARAM>(Clamp(settings_.sensitivity, 0.0, 100.0)));
 
     UpdateDynamicLabels();
+    InvalidateRect(Control(IDC_AUTO), nullptr, TRUE);
+    InvalidateRect(Control(IDC_TESTMODE), nullptr, TRUE);
 }
 
 void MainWindow::CollectSettingsAndApply(bool saveToDisk)
 {
-    settings_.targetLufs =
-        Clamp(ParseNumber(GetText(Control(IDC_TARGET)), settings_.targetLufs), -40.0, -5.0);
-    settings_.autoEnabled =
-        SendMessageW(Control(IDC_AUTO), BM_GETCHECK, 0, 0) == BST_CHECKED;
-    settings_.testMode =
-        SendMessageW(Control(IDC_TESTMODE), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    settings_.autoEnabled = SendMessageW(Control(IDC_AUTO), BM_GETCHECK, 0, 0) == BST_CHECKED;
+    settings_.testMode = SendMessageW(Control(IDC_TESTMODE), BM_GETCHECK, 0, 0) == BST_CHECKED;
     settings_.maxGainDb = Clamp(ParseNumber(GetText(Control(IDC_MAXGAIN)), settings_.maxGainDb), 0.0, 30.0);
     settings_.minGainDb =
         Clamp(ParseNumber(GetText(Control(IDC_MINGAIN)), settings_.minGainDb), -40.0, 0.0);
@@ -397,8 +578,7 @@ void MainWindow::CollectSettingsAndApply(bool saveToDisk)
         Clamp(ParseNumber(GetText(Control(IDC_RELEASE)), settings_.releaseMs), 50.0, 10000.0);
     settings_.calibrationDb =
         Clamp(ParseNumber(GetText(Control(IDC_CALIB)), settings_.calibrationDb), -40.0, 6.0);
-    settings_.sensitivity =
-        static_cast<double>(SendMessageW(Control(IDC_SENS), TBM_GETPOS, 0, 0));
+    settings_.sensitivity = static_cast<double>(SendMessageW(Control(IDC_SENS), TBM_GETPOS, 0, 0));
     settings_.rateDbPerSec =
         SpeedToRateDbPerSec(static_cast<double>(SendMessageW(Control(IDC_RATE), TBM_GETPOS, 0, 0)));
 
@@ -407,7 +587,14 @@ void MainWindow::CollectSettingsAndApply(bool saveToDisk)
 
     engine_.ApplySettings(settings_);
     if (saveToDisk)
+    {
         SettingsManager::Save(settings_);
+        settingsDirty_ = false;
+    }
+    else
+    {
+        settingsDirty_ = true;
+    }
 
     UpdateDynamicLabels();
     UpdateTrayTooltip();
@@ -415,15 +602,49 @@ void MainWindow::CollectSettingsAndApply(bool saveToDisk)
 
 void MainWindow::UpdateDynamicLabels()
 {
-    SetWindowTextW(GetDlgItem(hwnd_, IDC_RATEVAL),
-                   FormatW(L"%.1f dB/s", settings_.rateDbPerSec).c_str());
-    SetWindowTextW(GetDlgItem(hwnd_, IDC_SENSVAL),
-                   FormatW(L"窗口 %.0f ms", SensitivityToWindowMs(settings_.sensitivity)).c_str());
+    SetWindowTextW(Control(IDC_RATEVAL), FormatW(L"%.1f dB/s", settings_.rateDbPerSec).c_str());
+    SetWindowTextW(Control(IDC_SENSVAL),
+                   FormatW(L"%.0f ms", SensitivityToWindowMs(settings_.sensitivity)).c_str());
     SetWindowTextW(Control(IDC_PAUSE), engine_.IsPaused() ? L"继续自动均衡" : L"暂停自动均衡");
 }
 
+void MainWindow::ApplyTarget(double value, bool saveToDisk)
+{
+    settings_.targetLufs = Clamp(value, -40.0, -5.0);
+    SetWindowTextW(Control(IDC_TARGET_EDIT), FormatW(L"%.1f", settings_.targetLufs).c_str());
+    engine_.ApplySettings(settings_);
+    if (saveToDisk)
+        SettingsManager::Save(settings_);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void MainWindow::NudgeTarget(double delta)
+{
+    ApplyTarget(settings_.targetLufs + delta, true);
+}
+
+void MainWindow::ShowTargetPresetMenu()
+{
+    int count = 0;
+    const LoudnessPreset* presets = LoudnessPresets(count);
+
+    HMENU menu = CreatePopupMenu();
+    if (!menu)
+        return;
+
+    for (int i = 0; i < count; ++i)
+        AppendMenuW(menu, MF_STRING, IDM_PRESET_BASE + i, presets[i].label);
+
+    RECT button = {};
+    GetWindowRect(Control(IDC_TARGET_PRESET), &button);
+    SetForegroundWindow(hwnd_);
+    TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN, button.left, button.bottom, 0, hwnd_, nullptr);
+    PostMessageW(hwnd_, WM_NULL, 0, 0);
+    DestroyMenu(menu);
+}
+
 // ---------------------------------------------------------------------------
-// 事件处理
+// 事件
 // ---------------------------------------------------------------------------
 void MainWindow::OnTimer()
 {
@@ -436,41 +657,50 @@ void MainWindow::OnTimer()
 
 void MainWindow::OnCommand(int id, int code)
 {
+    if (id >= IDM_PRESET_BASE)
+    {
+        int count = 0;
+        const LoudnessPreset* presets = LoudnessPresets(count);
+        const int index = id - IDM_PRESET_BASE;
+        if (index >= 0 && index < count)
+            ApplyTarget(presets[index].value, true);
+        return;
+    }
+
     switch (id)
     {
-    case IDC_TARGET:
-        if (code == CBN_SELCHANGE)
-        {
-            const int index = static_cast<int>(SendMessageW(Control(IDC_TARGET), CB_GETCURSEL, 0, 0));
-            int presetCount = 0;
-            const LoudnessPreset* presets = LoudnessPresets(presetCount);
-            if (index >= 0 && index < presetCount)
-            {
-                settings_.targetLufs = presets[index].value;
-                SetWindowTextW(Control(IDC_TARGET), FormatW(L"%.1f", settings_.targetLufs).c_str());
-            }
-            CollectSettingsAndApply(true);
-        }
-        else if (code == CBN_KILLFOCUS)
-        {
-            CollectSettingsAndApply(true);
-            SetWindowTextW(Control(IDC_TARGET), FormatW(L"%.1f", settings_.targetLufs).c_str());
-        }
-        else if (code == CBN_EDITCHANGE)
-        {
-            const double value = ParseNumber(GetText(Control(IDC_TARGET)), settings_.targetLufs);
-            if (value >= -40.0 && value <= -5.0)
-            {
-                settings_.targetLufs = value;
-                engine_.ApplySettings(settings_);
-            }
-        }
+    case IDC_TARGET_EDIT:
+        if (code == EN_KILLFOCUS)
+            ApplyTarget(ParseNumber(GetText(Control(IDC_TARGET_EDIT)), settings_.targetLufs), true);
+        break;
+
+    case IDC_TARGET_MINUS:
+        if (code == BN_CLICKED)
+            NudgeTarget(-0.5);
+        break;
+
+    case IDC_TARGET_PLUS:
+        if (code == BN_CLICKED)
+            NudgeTarget(0.5);
+        break;
+
+    case IDC_TARGET_PRESET:
+        if (code == BN_CLICKED)
+            ShowTargetPresetMenu();
         break;
 
     case IDC_AUTO:
     case IDC_TESTMODE:
+    {
+        HWND button = Control(id);
+        const LRESULT checked = SendMessageW(button, BM_GETCHECK, 0, 0);
+        SendMessageW(button, BM_SETCHECK, checked == BST_CHECKED ? BST_UNCHECKED : BST_CHECKED, 0);
+        InvalidateRect(button, nullptr, TRUE);
         CollectSettingsAndApply(true);
+        RECT header = DRect(0, kHeaderTop, kClientWidth, kHeaderBottom);
+        InvalidateRect(hwnd_, &header, FALSE);
         break;
+    }
 
     case IDC_MAXGAIN:
     case IDC_MINGAIN:
@@ -482,10 +712,14 @@ void MainWindow::OnCommand(int id, int code)
         break;
 
     case IDC_PAUSE:
+    {
         engine_.SetPaused(!engine_.IsPaused());
         UpdateDynamicLabels();
         UpdateTrayTooltip();
+        RECT header = DRect(0, kHeaderTop, kClientWidth, kHeaderBottom);
+        InvalidateRect(hwnd_, &header, FALSE);
         break;
+    }
 
     case IDC_RESTORE:
         engine_.RestoreAllNow();
@@ -511,12 +745,20 @@ void MainWindow::OnCommand(int id, int code)
         }
         LoadSettingsToControls();
         CollectSettingsAndApply(true);
+        {
+            RECT header = DRect(0, kHeaderTop, kClientWidth, kHeaderBottom);
+            InvalidateRect(hwnd_, &header, FALSE);
+        }
         break;
 
     case IDM_TRAY_TESTMODE:
         settings_.testMode = !settings_.testMode;
         LoadSettingsToControls();
         CollectSettingsAndApply(true);
+        {
+            RECT header = DRect(0, kHeaderTop, kClientWidth, kHeaderBottom);
+            InvalidateRect(hwnd_, &header, FALSE);
+        }
         break;
 
     case IDM_TRAY_RESTORE:
@@ -538,11 +780,155 @@ void MainWindow::OnHorizontalScroll(HWND source)
         return;
     const int id = GetDlgCtrlID(source);
     if (id == IDC_RATE || id == IDC_SENS)
-        CollectSettingsAndApply(true);
+        CollectSettingsAndApply(false); // 拖动过程不写盘，退出/隐藏时再落盘
+}
+
+void MainWindow::OnDrawItem(const DRAWITEMSTRUCT& item)
+{
+    if (item.CtlType != ODT_BUTTON || item.itemAction == ODA_FOCUS)
+        return;
+
+    wchar_t caption[128] = {};
+    GetWindowTextW(item.hwndItem, caption, 128);
+
+    if (item.CtlID == IDC_AUTO || item.CtlID == IDC_TESTMODE)
+    {
+        const bool on = SendMessageW(item.hwndItem, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        const COLORREF color = (item.CtlID == IDC_TESTMODE) ? theme::kTeal : theme::kAmber;
+        DrawLedToggle(item.hDC, item.rcItem, caption, on, color);
+        return;
+    }
+
+    const bool pressed = (item.itemState & ODS_SELECTED) != 0;
+    const bool accent = (item.CtlID == IDC_RESUME);
+    DrawConsoleButton(item.hDC, item.rcItem, caption, pressed, accent);
 }
 
 // ---------------------------------------------------------------------------
-// 列表 / 托盘
+// 自绘背景 / 面板
+// ---------------------------------------------------------------------------
+void MainWindow::OnPaint()
+{
+    PAINTSTRUCT ps = {};
+    HDC dc = BeginPaint(hwnd_, &ps);
+
+    RECT client = {};
+    GetClientRect(hwnd_, &client);
+
+    HDC memory = CreateCompatibleDC(dc);
+    HBITMAP bitmap = CreateCompatibleBitmap(dc, client.right, client.bottom);
+    HGDIOBJ oldBitmap = SelectObject(memory, bitmap);
+
+    PaintConsole(memory, client);
+
+    BitBlt(dc, 0, 0, client.right, client.bottom, memory, 0, 0, SRCCOPY);
+
+    SelectObject(memory, oldBitmap);
+    DeleteObject(bitmap);
+    DeleteDC(memory);
+
+    EndPaint(hwnd_, &ps);
+}
+
+void MainWindow::PaintConsole(HDC dc, const RECT& client)
+{
+    // ---- 背景：深空渐变 + 星点 ----
+    theme::FillVerticalGradient(dc, client, theme::kSpaceTop, theme::kSpaceBottom);
+    PaintStarField(dc, client);
+
+    // ---- 顶栏 ----
+    const RECT header = DRect(0, kHeaderTop, kClientWidth, kHeaderBottom);
+    theme::FillVerticalGradient(dc, header, RGB(32, 38, 48), RGB(14, 17, 23));
+
+    RECT accentLine = DRect(0, 0, kClientWidth, 2);
+    theme::FillSolid(dc, accentLine, theme::kAmberDeep);
+    RECT accentGlow = DRect(0, 2, kClientWidth, 3);
+    theme::FillSolid(dc, accentGlow, RGB(46, 37, 20));
+    RECT headerBottom = DRect(0, kHeaderBottom - 1, kClientWidth, kHeaderBottom);
+    theme::FillSolid(dc, headerBottom, RGB(5, 7, 10));
+
+    HGDIOBJ oldFont = SelectObject(dc, theme::FontTitle());
+    theme::DrawTextSpaced(dc, L"LOUDNORM", DRect(28, 10, 460, 38), theme::kCream, D(4),
+                          DT_LEFT | DT_VCENTER);
+
+    SelectObject(dc, theme::FontSmall());
+    theme::DrawTextSpaced(dc, L"ABSOLUTE LOUDNESS NORMALIZER  ·  绝对响度自动均衡", DRect(30, 34, 620, 54),
+                          theme::kAmberDim, D(1), DT_LEFT | DT_VCENTER);
+
+    // 顶栏状态灯
+    const bool paused = engine_.IsPaused();
+    struct HeaderLed
+    {
+        const wchar_t* label;
+        int x;
+        bool on;
+        COLORREF color;
+    };
+    const bool agcOn = settings_.autoEnabled && !paused;
+    const HeaderLed leds[] = {
+        {L"AGC", 700, agcOn, theme::kAmber},
+        {L"TEST", 800, settings_.testMode, theme::kTeal},
+        {L"SYS", 900, engine_.IsRunning(), theme::kGreen},
+    };
+    for (const auto& led : leds)
+    {
+        theme::DrawLed(dc, D(led.x), D(22), D(5), led.color, led.on);
+        RECT label = DRect(led.x - 28, 32, led.x + 28, 50);
+        theme::DrawTextSpaced(dc, led.label, label, led.on ? theme::kCream : theme::kDim, D(1),
+                              DT_CENTER | DT_VCENTER);
+    }
+    SelectObject(dc, oldFont);
+
+    // ---- 面板标题工具 ----
+    const auto sectionHeader = [&](int top, const wchar_t* title, COLORREF ledColor) {
+        theme::DrawLed(dc, D(26), D(top + 13), D(3), ledColor, true);
+        SelectObject(dc, theme::FontSmall());
+        theme::DrawTextSpaced(dc, title, DRect(40, top + 4, 980, top + 24), theme::kAmberDim, D(1),
+                              DT_LEFT | DT_VCENTER);
+    };
+
+    // ---- 面板 A ----
+    const RECT plateA = DRect(12, kPlateATop, 988, kPlateABottom);
+    theme::DrawPlate(dc, plateA);
+    sectionHeader(kPlateATop, L"绝对目标响度  /  ABSOLUTE TARGET REFERENCE  (LUFS)", theme::kAmber);
+
+    // ---- 面板 B ----
+    const RECT plateB = DRect(12, kPlateBTop, 988, kPlateBBottom);
+    theme::DrawPlate(dc, plateB);
+    sectionHeader(kPlateBTop, L"增益与平滑  /  GAIN · ATTACK · RELEASE · SLEW", theme::kAmber);
+
+    // ---- 面板 C ----
+    const RECT plateC = DRect(12, kPlateCTop, 988, kPlateCBottom);
+    theme::DrawPlate(dc, plateC);
+
+    // ---- 面板 D（会话）----
+    const RECT plateD = DRect(12, kPlateDTop, 988, kPlateDBottom);
+    theme::DrawPlate(dc, plateD);
+    sectionHeader(kPlateDTop, L"当前音频会话  /  ACTIVE SESSIONS", theme::kGreen);
+
+    RECT listFrame = DRect(23, 389, 977, 663);
+    theme::DrawWell(dc, listFrame);
+
+    // ---- 状态条 ----
+    const RECT statusPlate = DRect(12, kStatusTop, 988, kStatusBottom);
+    theme::DrawPlate(dc, statusPlate);
+    theme::DrawLed(dc, D(26), D(683), D(3), engine_.IsPaused() ? theme::kDim : theme::kAmber,
+                   !engine_.IsPaused());
+
+    // ---- 数值输入框的内凹显示窗 ----
+    for (const auto& spec : kEditSpecs)
+    {
+        RECT well = DRect(spec.left - 4, spec.top - 4, spec.right + 4, spec.bottom + 4);
+        theme::DrawWell(dc, well);
+    }
+
+    // 面板之间的细缝高光
+    RECT divider = DRect(12, kPlateBBottom + 2, 988, kPlateBBottom + 3);
+    theme::FillSolid(dc, divider, RGB(34, 40, 50));
+}
+
+// ---------------------------------------------------------------------------
+// 会话列表
 // ---------------------------------------------------------------------------
 void MainWindow::UpdateList()
 {
@@ -551,6 +937,8 @@ void MainWindow::UpdateList()
         return;
 
     const std::vector<AppSnapshot> snapshots = engine_.Snapshots();
+    lastSnapshots_ = snapshots;
+
     const int desired = static_cast<int>(snapshots.size());
     int current = ListView_GetItemCount(list);
 
@@ -577,6 +965,7 @@ void MainWindow::UpdateList()
         const AppSnapshot& snapshot = snapshots[row];
         std::vector<std::wstring> cells;
         cells.push_back(snapshot.name);
+        cells.push_back(L"");
         cells.push_back(FormatW(L"%.0f%%", snapshot.volumePercent));
         cells.push_back(FormatLufs(snapshot.estimatedLufs));
         cells.push_back(FormatLufs(snapshot.targetLufs));
@@ -589,10 +978,127 @@ void MainWindow::UpdateList()
         rowCache_[row] = cells;
 
         for (int column = 0; column < static_cast<int>(cells.size()); ++column)
+        {
+            if (column == kColumnLevel)
+                continue;
             ListView_SetItemText(list, row, column, const_cast<wchar_t*>(cells[column].c_str()));
+        }
     }
+
+    if (desired > 0)
+        ListView_RedrawItems(list, 0, desired - 1);
 }
 
+LRESULT MainWindow::OnListCustomDraw(const NMLVCUSTOMDRAW* customDraw)
+{
+    auto* draw = const_cast<NMLVCUSTOMDRAW*>(customDraw);
+
+    switch (draw->nmcd.dwDrawStage)
+    {
+    case CDDS_PREPAINT:
+    {
+        RECT client = {};
+        GetClientRect(draw->nmcd.hdr.hwndFrom, &client);
+        FillRect(draw->nmcd.hdc, &client, theme::BrushWell());
+        return CDRF_NOTIFYITEMDRAW;
+    }
+
+    case CDDS_ITEMPREPAINT:
+    {
+        const int row = static_cast<int>(draw->nmcd.dwItemSpec);
+        const bool selected = (draw->nmcd.uItemState & CDIS_SELECTED) != 0;
+        draw->clrTextBk = selected ? RGB(52, 40, 20) : ((row % 2) ? theme::kRowB : theme::kRowA);
+        draw->clrText = theme::kCream;
+        return CDRF_NOTIFYSUBITEMDRAW;
+    }
+
+    case CDDS_ITEMPREPAINT | CDDS_SUBITEM:
+    {
+        const int row = static_cast<int>(draw->nmcd.dwItemSpec);
+        const int column = draw->iSubItem;
+        const bool selected = (draw->nmcd.uItemState & CDIS_SELECTED) != 0;
+        const bool inRange = row >= 0 && row < static_cast<int>(lastSnapshots_.size());
+
+        if (column == kColumnLevel)
+        {
+            // 注意：LVM_GETSUBITEMRECT 需要 rc.left = 子项序号，rc.top = 行号
+            RECT cell = {};
+            cell.left = kColumnLevel;
+            cell.top = row;
+            SendMessageW(draw->nmcd.hdr.hwndFrom, LVM_GETSUBITEMRECT, static_cast<WPARAM>(row),
+                         reinterpret_cast<LPARAM>(&cell));
+            FillRect(draw->nmcd.hdc, &cell,
+                     selected ? theme::BrushRowA() : ((row % 2) ? theme::BrushRowB() : theme::BrushRowA()));
+
+            if (inRange)
+            {
+                const AppSnapshot& snapshot = lastSnapshots_[row];
+                const double ratio = snapshot.playing ? Clamp((snapshot.peakDbfs + 60.0) / 60.0, 0.0, 1.0) : 0.0;
+                RECT bar = cell;
+                InflateRect(&bar, -8, -8);
+                if (bar.right > bar.left && bar.bottom > bar.top)
+                    theme::DrawLedBar(draw->nmcd.hdc, bar, ratio, 16);
+            }
+            return CDRF_SKIPDEFAULT;
+        }
+
+        COLORREF color = theme::kDim;
+        switch (column)
+        {
+        case 0:
+            color = theme::kCream;
+            break;
+        case 2:
+            color = theme::kDim;
+            break;
+        case 3:
+            color = inRange ? theme::kAmber : theme::kDim;
+            break;
+        case 4:
+            color = theme::kDim;
+            break;
+        case 5:
+        {
+            const double gain = inRange ? lastSnapshots_[row].appliedGainDb : 0.0;
+            color = (gain > 0.2) ? theme::kGreen : ((gain < -0.2) ? theme::kAmber : theme::kDim);
+            break;
+        }
+        case 6:
+            color = theme::Blend(theme::kDim, theme::kTeal, 0.45);
+            break;
+        case 7:
+        {
+            AppState state = inRange ? lastSnapshots_[row].state : AppState::Disabled;
+            switch (state)
+            {
+            case AppState::Adjusting: color = theme::kAmber; break;
+            case AppState::Stable: color = theme::kGreen; break;
+            case AppState::Capped: color = theme::kRed; break;
+            case AppState::Manual: color = theme::kTeal; break;
+            case AppState::TestMode: color = theme::kTeal; break;
+            case AppState::Warming: color = theme::kAmberDim; break;
+            default: color = theme::kDim; break;
+            }
+            break;
+        }
+        default:
+            break;
+        }
+
+        draw->clrText = color;
+        return CDRF_DODEFAULT;
+    }
+
+    default:
+        break;
+    }
+
+    return CDRF_DODEFAULT;
+}
+
+// ---------------------------------------------------------------------------
+// 托盘
+// ---------------------------------------------------------------------------
 void MainWindow::UpdateTrayTooltip()
 {
     const wchar_t* state = L"运行中";
@@ -636,6 +1142,11 @@ void MainWindow::HideToTray()
 {
     if (!hwnd_)
         return;
+    if (settingsDirty_)
+    {
+        SettingsManager::Save(settings_);
+        settingsDirty_ = false;
+    }
     ShowWindow(hwnd_, SW_HIDE);
     hidden_ = true;
     if (!trayHintShown_)
@@ -662,7 +1173,11 @@ void MainWindow::ExitApplication()
     exiting_ = true;
 
     KillTimer(hwnd_, kTimerId);
-    // 停止自动增益控制、恢复所有应用原始音量、释放音频会话对象
+    if (settingsDirty_)
+    {
+        SettingsManager::Save(settings_);
+        settingsDirty_ = false;
+    }
     engine_.Stop();
     tray_.Remove();
 
