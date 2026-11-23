@@ -99,7 +99,7 @@ Settings SettingsManager::Load()
         ReadInt(file, L"Window", L"MinimizeToTrayOnClose", s.minimizeToTrayOnClose ? 1 : 0) != 0;
 
     // 合法性保护
-    s.targetLufs = NormalizeTargetLufs(s.targetLufs);
+    s.targetLufs = Clamp(s.targetLufs, kTargetLufsMin, kTargetLufsMax);
     s.maxGainDb = Clamp(s.maxGainDb, 0.0, 30.0);
     s.minGainDb = Clamp(s.minGainDb, -40.0, 0.0);
     s.attackMs = Clamp(s.attackMs, 50.0, 10000.0);

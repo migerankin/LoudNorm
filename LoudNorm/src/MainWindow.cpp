@@ -94,6 +94,16 @@ double ParseNumber(const std::wstring& text, double fallback)
     return value;
 }
 
+// 目标响度步进：默认 0.5 dB，按住 Ctrl 为 0.1 dB，按住 Shift 为 5 dB
+double TargetStep()
+{
+    if (GetKeyState(VK_CONTROL) < 0)
+        return 0.1;
+    if (GetKeyState(VK_SHIFT) < 0)
+        return 5.0;
+    return 0.5;
+}
+
 // 罗盘 / 星空般的背景斑点
 void PaintStarField(HDC dc, const RECT& rc)
 {
@@ -458,13 +468,14 @@ void MainWindow::CreateControls()
     // ---- 顶栏：标题 + 状态指示灯（全部由 WM_PAINT 绘制，无子控件）----
 
     // ---- 面板 A：绝对目标响度 ----
-    make(L"EDIT", L"-16.0", ES_CENTER | ES_AUTOHSCROLL, IDC_TARGET_EDIT, 30, 102, 116, 26,
-         theme::FontMonoBig());
+    HWND targetEdit = make(L"EDIT", L"-16.0", ES_CENTER | ES_AUTOHSCROLL, IDC_TARGET_EDIT, 30, 102, 116, 26,
+                           theme::FontMonoBig());
+    SetWindowSubclass(targetEdit, TargetEditProc, 1, reinterpret_cast<DWORD_PTR>(this));
     make(L"BUTTON", L"-", BS_OWNERDRAW, IDC_TARGET_MINUS, 158, 102, 26, 26, theme::FontMono());
     make(L"BUTTON", L"+", BS_OWNERDRAW, IDC_TARGET_PLUS, 186, 102, 26, 26, theme::FontMono());
     make(L"BUTTON", L"PRESET", BS_OWNERDRAW, IDC_TARGET_PRESET, 220, 102, 112, 26, theme::FontSmall());
 
-    label(L"绝对基准 · 每个应用独立测量 / 独立调整", 348, 104, 320, 22, theme::FontSmall());
+    label(L"绝对基准 · ↑↓/滚轮微调（Ctrl 0.1 / Shift 5）", 348, 104, 330, 22, theme::FontSmall());
     make(L"BUTTON", L"自动均衡", BS_OWNERDRAW, IDC_AUTO, 684, 101, 130, 28, theme::FontUi());
     make(L"BUTTON", L"测试模式", BS_OWNERDRAW, IDC_TESTMODE, 826, 101, 140, 28, theme::FontUi());
 
@@ -604,7 +615,9 @@ void MainWindow::UpdateDynamicLabels()
 
 void MainWindow::ApplyTarget(double value, bool saveToDisk)
 {
-    settings_.targetLufs = NormalizeTargetLufs(value);
+    // 允许 -60 ~ 0 dB 的任意值，并按 0.1 dB 取整，保证显示与实际值一致
+    const double clamped = Clamp(value, kTargetLufsMin, kTargetLufsMax);
+    settings_.targetLufs = std::round(clamped * 10.0) / 10.0;
     SetWindowTextW(Control(IDC_TARGET_EDIT), FormatW(L"%.1f", settings_.targetLufs).c_str());
     engine_.ApplySettings(settings_);
     if (saveToDisk)
@@ -615,6 +628,63 @@ void MainWindow::ApplyTarget(double value, bool saveToDisk)
 void MainWindow::NudgeTarget(double delta)
 {
     ApplyTarget(settings_.targetLufs + delta, true);
+}
+
+void MainWindow::CommitTargetEdit()
+{
+    ApplyTarget(ParseNumber(GetText(Control(IDC_TARGET_EDIT)), settings_.targetLufs), true);
+}
+
+LRESULT CALLBACK MainWindow::TargetEditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
+                                            UINT_PTR subclassId, DWORD_PTR refData)
+{
+    UNREFERENCED_PARAMETER(subclassId);
+    auto* self = reinterpret_cast<MainWindow*>(refData);
+    if (!self)
+        return DefSubclassProc(hwnd, message, wParam, lParam);
+
+    const auto nudge = [self, hwnd](double delta) {
+        self->NudgeTarget(delta);
+        SendMessageW(hwnd, EM_SETSEL, 0, -1); // 选中全部，便于直接覆盖输入
+    };
+
+    if (message == WM_KEYDOWN)
+    {
+        switch (wParam)
+        {
+        case VK_UP:
+            nudge(TargetStep());
+            return 0;
+        case VK_DOWN:
+            nudge(-TargetStep());
+            return 0;
+        case VK_PRIOR:
+            nudge(5.0);
+            return 0;
+        case VK_NEXT:
+            nudge(-5.0);
+            return 0;
+        case VK_RETURN:
+            self->CommitTargetEdit();
+            SendMessageW(hwnd, EM_SETSEL, 0, -1);
+            return 0;
+        case VK_ESCAPE:
+            SetWindowTextW(hwnd, FormatW(L"%.1f", self->settings_.targetLufs).c_str());
+            SendMessageW(hwnd, EM_SETSEL, 0, -1);
+            return 0;
+        default:
+            break;
+        }
+    }
+    else if (message == WM_MOUSEWHEEL)
+    {
+        const short wheelDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+        if (wheelDelta != 0)
+            nudge(wheelDelta > 0 ? TargetStep() : -TargetStep());
+        return 0;
+    }
+
+    return DefSubclassProc(hwnd, message, wParam, lParam);
 }
 
 void MainWindow::ShowTargetPresetMenu()
@@ -665,17 +735,17 @@ void MainWindow::OnCommand(int id, int code)
     {
     case IDC_TARGET_EDIT:
         if (code == EN_KILLFOCUS)
-            ApplyTarget(ParseNumber(GetText(Control(IDC_TARGET_EDIT)), settings_.targetLufs), true);
+            CommitTargetEdit();
         break;
 
     case IDC_TARGET_MINUS:
         if (code == BN_CLICKED)
-            NudgeTarget(-0.5);
+            NudgeTarget(-TargetStep());
         break;
 
     case IDC_TARGET_PLUS:
         if (code == BN_CLICKED)
-            NudgeTarget(0.5);
+            NudgeTarget(TargetStep());
         break;
 
     case IDC_TARGET_PRESET:

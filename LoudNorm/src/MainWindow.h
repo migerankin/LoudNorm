@@ -27,7 +27,12 @@ private:
 
     void ApplyTarget(double value, bool saveToDisk);
     void NudgeTarget(double delta);
+    void CommitTargetEdit();
     void ShowTargetPresetMenu();
+
+    // 目标响度输入框子类化：上下键 / 翻页键 / 滚轮微调，回车提交，Esc 撤销
+    static LRESULT CALLBACK TargetEditProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam,
+                                           UINT_PTR subclassId, DWORD_PTR refData);
 
     void OnTimer();
     void OnCommand(int id, int code);

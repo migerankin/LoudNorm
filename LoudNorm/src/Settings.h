@@ -5,18 +5,9 @@
 
 namespace ln {
 
-// 目标响度允许范围。
-// 上限取 0 LUFS：0 LUFS 即数字满刻度，而 WASAPI 会话音量只能在 0~100% 之间衰减，
-// 无法把信号放大到超过应用自身的满刻度输出，因此“正的 LUFS 目标”在本架构下不可达。
-constexpr double kTargetLufsMin = -70.0;
+// 目标响度允许范围（绝对值基准，越界输入会被钳制到该区间）
+constexpr double kTargetLufsMin = -60.0;
 constexpr double kTargetLufsMax = 0.0;
-
-// 目标响度统一入口：钳制范围 + 量化到 0.1 dB
-inline double NormalizeTargetLufs(double value)
-{
-    const double clamped = Clamp(value, kTargetLufsMin, kTargetLufsMax);
-    return std::round(clamped * 10.0) / 10.0;
-}
 
 struct Settings
 {
@@ -58,14 +49,16 @@ struct LoudnessPreset
 inline const LoudnessPreset* LoudnessPresets(int& count)
 {
     static const LoudnessPreset kPresets[] = {
-        { -30.0, L"-30 LUFS (影视 / 播客对白)" },
+        { -27.0, L"-27 LUFS (电视广播)" },
         { -23.0, L"-23 LUFS (EBU R128)" },
         { -20.0, L"-20 LUFS" },
+        { -19.0, L"-19 LUFS" },
         { -18.0, L"-18 LUFS" },
         { -16.0, L"-16 LUFS (推荐)" },
-        { -14.0, L"-14 LUFS" },
+        { -15.0, L"-15 LUFS" },
+        { -14.0, L"-14 LUFS (流媒体)" },
         { -12.0, L"-12 LUFS" },
-        { -9.0, L"-9 LUFS (高响度母带)" },
+        { -10.0, L"-10 LUFS (高响度)" },
     };
     count = static_cast<int>(sizeof(kPresets) / sizeof(kPresets[0]));
     return kPresets;
